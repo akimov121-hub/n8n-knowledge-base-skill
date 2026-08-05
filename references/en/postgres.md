@@ -6,18 +6,18 @@ Postgres nodes: `executeQuery`, Postgres Chat Memory.
 
 ## ✅ Solutions
 
-### PG-R1. Controlling a value's type in SQL — embed `{{ Number(...) }}` directly in the query text
+### PG-R1. Control the value type in SQL — embed `{{ Number(...) }}` directly in the query text
 
-- **Context:** you need to substitute a numeric value (id, message_id) into a query so that it
-  reaches the DB as a **number**, not a string.
+- **Context:** need to pass a numeric value into a query (id, message_id) so it lands in the DB
+  as a **number**, not a string.
 - **Fact (verified):** cross-node references in `queryReplacement` **are evaluated** —
-  `$('Node').first().json.field` resolves correctly. So passing a value via
-  `queryReplacement` with a cross-node ref is a valid approach.
-- **Caveat:** `queryReplacement` passes the value as parameter `$1`, and the evaluated
-  result often goes through as a **string**. If the target column is `bigint`/`numeric` this
-  produces an error (see PG-E1). To guarantee the value goes through as a number, two paths:
-  1. Wrap it in `Number(...)` directly in the `queryReplacement` expression.
-  2. Embed the numeric literal directly in the SQL text:
+  `$('Node').first().json.field` resolves normally. So passing a value through
+  `queryReplacement` with a cross-node ref is a working approach.
+- **Nuance:** `queryReplacement` passes the value as the `$1` parameter, and the evaluated
+  result often comes out as a **string**. If the target column is `bigint`/`numeric` — this
+  causes an error (see PG-E1). To guarantee the value goes in as a number, two options:
+  1. Wrap it in `Number(...)` right inside the `queryReplacement` expression.
+  2. Embed a numeric literal directly in the SQL text:
 
 ```sql
 VALUES ({{ Number($('Telegram Trigger').first().json.message.message_id) }})
@@ -27,34 +27,33 @@ Status: ✅ Confirmed.
 
 ### PG-R2. Arbitrary SQL / DDL via a temporary webhook workflow
 
-- **Context:** the public n8n REST API cannot execute arbitrary SQL; the Postgres
-  Chat Memory nodes create tables lazily (on the first message); you need to create a table
-  ahead of time, inspect the schema, run a "dry" test before a `DELETE`, or selectively
-  populate a lookup table.
+- **Context:** the public n8n REST API cannot execute arbitrary SQL; Postgres Chat Memory nodes
+  create tables lazily (on the first message); sometimes you need to create a table ahead of
+  time, inspect the schema, run a "dry" test before a `DELETE`, or fill in a lookup table
+  precisely.
 - **Solution:** a one-off workflow `Webhook (POST) → Postgres executeQuery → Respond to
-  Webhook (allIncomingItems)`. Create it via `POST /api/v1/workflows`, activate it, hit it
-  with curl, read the result from the response, then **deactivate and delete it** (don't leave
-  an active public webhook around — a small risk).
-- **Use cases:** `CREATE TABLE`, schema verification (`SELECT … FROM information_schema.columns`),
-  a dry run of a cleanup (`SELECT count(*)` instead of `DELETE` — to see what would be deleted),
-  populating lookup tables with an `INSERT` using dollar-quoting (`$Q$text$Q$`) for texts with
+  Webhook (allIncomingItems)`. Create it via `POST /api/v1/workflows`, activate it, hit it with
+  curl, read the result from the response, then **deactivate and delete it** (don't leave an
+  active public webhook lying around — a small risk).
+- **Uses:** `CREATE TABLE`, schema checks (`SELECT … FROM information_schema.columns`), a dry
+  run for cleanup (`SELECT count(*)` instead of `DELETE` — to see what would be deleted),
+  populating lookup tables with `INSERT` using dollar-quoting (`$Q$text$Q$`) for text containing
   quotes.
-- **Caveat:** the table name can be substituted with an expression directly in the
-  `executeQuery` text (`{{ $json.table }}`) — n8n resolves the expression before sending to
-  the DB. This is safe as long as the name comes from your own controlled list, not from user
-  input.
+- **Nuance:** the table name can be embedded as an expression right in the `executeQuery` text
+  (`{{ $json.table }}`) — n8n resolves the expression before sending it to the DB. Safe as long
+  as the name comes from your own controlled list, not from user input.
 
 Status: ✅ Confirmed.
 
-### PG-R3. Inserting into the lowest free `id` (gap-fill, reusing numbers)
+### PG-R3. Insert into the smallest free `id` (gap-fill, number reuse)
 
-- **Context:** the record's `id` is shown to the user as a "number" (bot memory, reminders,
-  any personal list). With a plain `serial`, deletions leave gaps and new records go to the
-  end. You want numbers to run without gaps and for **the freed-up number to be taken by the
+- **Context:** the user is shown a record's `id` as a "number" (bot memory, reminders, any
+  personal list). With a plain `serial`, gaps remain after deletion and new records go to the
+  end. The goal is for numbers to run without gaps, with **the freed-up number taken by the
   next new record**.
-- **Solution:** don't touch the schema or recreate the PK. Instead of `serial`, insert an
-  **explicit `id` = the lowest free one** via `generate_series` + an anti-join. The real PK
-  then equals the displayed number — `delete`/`update` address it directly.
+- **Solution:** don't touch the schema or recreate the PK. Instead insert an explicit
+  `id` = smallest free value via `generate_series` + anti-join. The real PK then equals the
+  displayed number — `delete`/`update` address it directly.
 
 ```sql
 INSERT INTO <table> (id, ...) VALUES (
@@ -66,22 +65,22 @@ INSERT INTO <table> (id, ...) VALUES (
 ) RETURNING id;
 ```
 
-- **Behavior:** empty → id 1; have {2,3,4} → a new one takes 1, then 5; deleted a middle one →
-  the next new one takes it. Existing numbers don't change.
-- **Caveats:** the scalar subquery in `VALUES` sees the table BEFORE the insert — correct.
-  Since we always insert an explicit `id`, the `serial` counter isn't used → no collisions
-  (it's important that ALL insert paths go through this pattern). For multi-user, add
+- **Behavior:** empty → id 1; has {2,3,4} → new record takes 1, then 5; delete one in the
+  middle → the next new record takes it. Existing numbers never change.
+- **Nuances:** the scalar subquery in `VALUES` sees the table BEFORE the insert — correct.
+  Since we always insert an explicit `id`, the `serial` counter is never used → no collisions
+  (important that ALL insert paths go through this pattern). For multi-user cases add
   `WHERE telegram_id=...` to both parts of the subquery.
 - **Related:** editing a record "in place" is a separate `UPDATE` by id, not delete+insert
   (otherwise the number moves to the end).
 
 Status: ✅ Confirmed in production.
 
-### PG-R4. Idempotency of an action via atomic status capture (protection against a double button press)
+### PG-R4. Idempotent action via atomic status capture (double-tap protection for buttons)
 
-- **Context:** an inline button that triggers an irreversible action (publishing, charging,
-  sending), when pressed twice, spawns **two parallel runs**. Both read the "ready to act"
-  status before the first one changes it → the action runs twice (a double post, etc.).
+- **Context:** an inline button that triggers an irreversible action (publishing, a charge,
+  sending) produces **two parallel runs** on a double tap. Both read the "ready for action"
+  status before the first one changes it → the action executes twice (double post, etc.).
 - **Solution:** not "SELECT status → IF", but an **atomic UPDATE with a condition** on the
   status row:
 
@@ -93,47 +92,46 @@ RETURNING <needed columns>;
 
   Postgres serializes concurrent UPDATEs on a row: the first flips
   `await_review→processing` and returns the row, the second no longer finds `await_review` →
-  0 rows. **Important (see PG-E2):** on 0 rows the node returns NOT 0 items, but a service item
-  `{success:true}` — so the protection only works in combination with an IF on the status/key
-  field (`stage='processing'` / `chat_id notEmpty`) right after the UPDATE. No timers/debounces —
-  the guarantee is at the DB level + a mandatory IF.
-- **Caveat:** if the action can partially fail after the capture — the status stays
-  `processing`; provide a rollback or drive it to a final status in every branch
-  (onError continue).
+  0 rows. **Important (see PG-E2):** on 0 rows the node returns NOT 0 items but a service item
+  `{success:true}` — so the guard only works paired with an IF on the status/key field
+  (`stage='processing'` / `chat_id notEmpty`) right after the UPDATE. No timers/debounces —
+  the guarantee lives at the DB level plus a mandatory IF.
+- **Nuance:** if the action can partially fail after capturing the status, the status stays
+  `processing`; plan a rollback or drive it to a final status on every branch (onError
+  continue).
 
 Status: ✅ Confirmed.
 
-### PG-R5. Text parameters via queryReplacement as an array-expression
+### PG-R5. Text parameters via a `queryReplacement` array expression
 
-- **Pattern:** pass user text into SQL NOT by concatenation with `'`→`''` escaping,
-  but as parameters `$1..$n`: in the node options `queryReplacement` = `={{ [expression1, expression2, ...] }}`
-  (a single expression returning an array).
-- **Why an array:** the comma-separated string format of queryReplacement breaks on commas
-  inside a value; an array-expression carries commas, quotes, HTML, and line breaks without
-  loss.
+- **Pattern:** pass user text into SQL NOT via string concatenation with `'`→`''` escaping, but
+  as `$1..$n` parameters: in the node's options, `queryReplacement` = `={{ [expr1, expr2, ...] }}`
+  (one expression returning an array).
+- **Why an array:** the string comma-separated `queryReplacement` format breaks on commas
+  inside a value; an array expression carries commas, quotes, HTML, and newlines without loss.
 - **Verified live:** `SELECT $1::text...` + `={{ [$json.body.a, ...] }}` — values with
   commas/quotes/tags came back 1:1.
-- **Limitation:** values go through as strings — for `bigint`/`numeric` columns still
-  embed `{{ Number(...) }}` as a literal in the SQL (PG-R1, PG-E1).
-- **Use case:** the publisher product — all writes of post text/instructions/caption.
+- **Limitation:** values still go in as strings — for `bigint`/`numeric` columns still embed
+  `{{ Number(...) }}` as a literal in the SQL (PG-R1, PG-E1).
+- **Use case:** the publisher product — all post text/instruction/caption records.
 
 Status: ✅ Confirmed.
 
-### PG-R6. Webhook response as a list/object — `json_agg`/scalar-subquery, guaranteed 1 row
+### PG-R6. Webhook response as list/object — `json_agg`/scalar subquery, guaranteed 1 row
 
-- **Context:** in the Mini App API (webhook + Respond), actions like `list`/`get` read from
-  the DB. If a SELECT returns 0 rows — the branch may not continue, and the `Respond to Webhook`
-  node won't fire → **the request hangs** on the frontend (see also the ambiguity of PG-E2:
-  0 rows → sometimes `{success:true}`, sometimes empty).
+- **Context:** in the Mini App API (webhook + Respond), `list`/`get` actions read from the DB.
+  If the SELECT returns 0 rows, the branch may not continue, and the `Respond to Webhook` node
+  never fires → **the request hangs** on the frontend (see also the PG-E2 ambiguity: 0 rows →
+  sometimes `{success:true}`, sometimes empty).
 - **Solution:** wrap the query so the node **always returns exactly 1 row**:
   - list → `SELECT COALESCE(json_agg(x), '[]'::json) AS __list FROM (SELECT ... ) x;` —
     empty → `[]`, otherwise an array.
   - object → `SELECT COALESCE((SELECT to_jsonb(t) FROM (SELECT ...) t), '{}'::jsonb) AS __obj;` —
     no record → `{}`.
 
-  Then a Code node normalizes (`if(typeof v==='string') JSON.parse`), and Respond returns the
-  array/object. Bonus: `bigint` inside `json_agg`/`to_jsonb` is serialized as a **number** (not
-  a string) — this fixes epoch-ms times for the frontend.
+  Downstream, a Code node normalizes (`if(typeof v==='string') JSON.parse`), Respond returns
+  the array/object. Bonus: `bigint` inside `json_agg`/`to_jsonb` serializes as a **number**
+  (not a string) — fixes epoch-ms timestamps for the frontend.
 
 Status: ✅ Confirmed.
 
@@ -143,137 +141,376 @@ Status: ✅ Confirmed.
 
 ### PG-E1. `invalid input syntax for type bigint`
 
-- **Symptom:** Postgres executeQuery fails with `invalid input syntax for type bigint`.
-- **Cause:** `queryReplacement` passes the evaluated value as parameter `$1`
-  **as a string**; if the column is `bigint`/`numeric` and the string is empty or non-numeric,
-  Postgres won't coerce it and fails. (The cause is precisely the value's type, not that the
-  cross-node expression "isn't evaluated" — it is evaluated, see PG-R1.)
-- **Fix:** wrap the value in `Number(...)` in `queryReplacement`, or embed the numeric
-  literal directly in the SQL via `{{ Number(...) }}`. Also ensure the value is non-empty.
+- **Symptom:** the Postgres executeQuery node fails with `invalid input syntax for type bigint`.
+- **Cause:** `queryReplacement` passes the evaluated value as the `$1` parameter **as a
+  string**; if the column is `bigint`/`numeric` and the string is empty or non-numeric,
+  Postgres doesn't cast it and fails. (The cause is the value's type, not that the cross-node
+  expression "isn't evaluated" — it is evaluated, see PG-R1.)
+- **Fix:** wrap the value in `Number(...)` in `queryReplacement`, or embed a numeric literal
+  directly in the SQL via `{{ Number(...) }}`. Also make sure the value isn't empty.
 
-### PG-E2. executeQuery on 0 rows returns an item {success:true}, not 0 items
+### PG-E2. On 0 rows, executeQuery returns the item `{success:true}`, not 0 items
 
 - **Symptom:** downstream nodes after a Postgres node execute even though the query
-  (UPDATE...RETURNING / SELECT) returned no rows; the item contains `{"success": true}`
-  without the query's fields. If an Execute Workflow node sits after it, the sub-workflow is
+  (UPDATE...RETURNING / SELECT) returned no rows; the item contains `{"success": true}` with
+  none of the query's fields. If an Execute Workflow node follows — the sub-workflow gets
   called with this junk item (`image_url=undefined`, etc.).
-- **Cause:** the n8n Postgres executeQuery, on an empty result, emits a service item
-  `{success:true}` — you can't rely on "0 rows → the branch won't execute".
-- **Fix:** after every query that "may return 0 rows" — an IF-guard on a key field
-  (`{{ $json.chat_id }}` notEmpty or a status check), and only then the action.
+- **Cause:** n8n's Postgres executeQuery node emits a service item `{success:true}` on an
+  empty result — you can't rely on "0 rows → the branch won't run."
+- **Fix:** after every query that "might return 0 rows," add an IF guard on a key field
+  (`{{ $json.chat_id }}` notEmpty, or a status check), and only then take the action.
 - **Status:** ⚠️ Confirmed in practice.
 
 ### PG-E3. Dollar-quoting `$tag$…$tag$` with a numeric value breaks n8n's parameter scanner
 
 - **Symptom:** the Postgres node fails with `Variable $<large number> exceeds supported maximum of $100000`,
-  even though there's no such parameter number in the query. Example: inserting a Telegram bot token
-  `<BOT_TOKEN>` via `VALUES ('bot_token', $tok$<BOT_TOKEN>$tok$)`.
-- **Cause:** n8n scans the SQL for `$N` placeholders (queryReplacement) **before** sending to
-  Postgres and doesn't understand dollar-quoting. The closing `$` of the tag + the value's
-  digits (`…$tok$<token digits>`) are read as `$<number>` → a "parameter number" out of range.
-- **Fix:** **never** insert values with dollar-quoting — pass them as a native parameter
-  `$1` via `options.queryReplacement` (see PG-R5). This is especially critical for values
-  starting with digits (ids, tokens).
+  even though there's no such parameter number in the query. Example: inserting a Telegram
+  bot token `<BOT_TOKEN>` via `VALUES ('bot_token', $tok$<BOT_TOKEN>$tok$)`.
+- **Cause:** n8n scans the SQL for `$N` placeholders (queryReplacement) **before** sending it
+  to Postgres, and doesn't understand dollar-quoting. The tag's closing `$` plus the value's
+  leading digits (`…$tok$<token digits>`) get read as `$<number>` → "parameter number" out of
+  range.
+- **Fix:** **never** insert values via dollar-quoting — pass them as a native `$1` parameter
+  via `options.queryReplacement` (see PG-R5). Especially critical for values that start with
+  digits (ids, tokens).
 - **Status:** ⚠️ Confirmed in practice.
 
 ### PG-E4. Multi-statement SQL as an n8n expression (with `{{ }}`) → "invalid syntax"
 
 - **Symptom:** a Postgres node with a multi-statement query (several `;`), where values are
-  embedded via `{{ … }}` (i.e. the entire query text became an n8n expression with a leading `=`),
-  fails with `invalid syntax` before even reaching Postgres. A single statement with the same
-  `{{ }}` works fine.
-- **Cause:** when the entire SQL is one n8n expression, the expression parser trips on the
-  complex multi-statement text (especially with regex/special characters inside `{{ }}`). This is
-  a bug in the n8n expression engine, not Postgres.
-- **Fix:** **one statement — one node** + values as native parameters `$1`
-  (queryReplacement); leave `{{ }}` only in separate fields (params / chatId / text of the
-  Telegram node), but NOT in the SQL text. Decompose a multi-step operation (UPSERT + flag + log +
-  query) into a chain of nodes. For regexes/sanitizing — a separate Code node (Prep), and the SQL
-  references the ready, clean values.
-- **Status:** ✅ Confirmed (after splitting into single statements everything worked;
-  the grant/revoke/add/decline smoke cycle is green).
+  embedded via `{{ … }}` (i.e. the entire query text became one n8n expression with a leading
+  `=`), fails with `invalid syntax` before it even reaches Postgres. A single statement with
+  the same `{{ }}` works fine.
+- **Cause:** when the whole SQL is one n8n expression, the expression parser trips over complex
+  multi-statement text (especially with regex/special characters inside `{{ }}`). This is a
+  bug in n8n's expression engine, not Postgres.
+- **Fix:** **one statement — one node**, with values as native `$1` parameters
+  (queryReplacement); keep `{{ }}` only in separate fields (params / chatId / text of a
+  Telegram node), NOT inside the SQL text. Break a multi-step operation (UPSERT + flag + log +
+  select) into a chain of nodes. For regex/sanitizing — a separate Code node (Prep), with SQL
+  referencing already-clean values.
+- **Status:** ✅ Confirmed (after splitting into single statements everything worked; the
+  grant/revoke/add/decline smoke cycle is green).
 
 ### PG-E5. executeQuery with multi-statement SQL returns the result of the FIRST statement, not the last
 
-- **Symptom:** a Postgres node has one query made of several statements
-  (`INSERT…; UPDATE…; SELECT…;`). All statements **execute** (the writes go through), but the
-  node's output item gets the result of the **first** statement. A node downstream that reads
+- **Symptom:** a Postgres node runs one query made of several statements
+  (`INSERT…; UPDATE…; SELECT…;`). All statements **execute** (records go through), but the
+  node's output item contains the result of the **first** statement. A node downstream reading
   `$('This node').first().json.<field from the last SELECT>` gets `undefined`. Example: a
-  grant node (3 writes + a final `SELECT bot_name`), and the message renders as «to the bot
-  "undefined"».
-- **Test (read-only):** `SELECT 'a' AS first_stmt; SELECT 'b' AS second;` → the node returned
-  `{first_stmt:'a'}`.
-- **Fix:** fetch the value needed downstream with a **separate node** (a single
-  SELECT) — its result is correct. Leave multi-statement writes as is if their result isn't
-  read. In the Mini App API this is already split across nodes (Grant SQL separate from
-  Grant BotName).
+  grant node (3 writes + a final `SELECT bot_name`), the message renders as "bot
+  «undefined»."
+- **Verification (read-only):** `SELECT 'a' AS first_stmt; SELECT 'b' AS second;` → the node
+  returned `{first_stmt:'a'}`.
+- **Fix:** fetch the value needed downstream with a **separate node** (a single SELECT) — its
+  result is correct. Leave multi-statement writes as-is if their result isn't read. In the Mini
+  App API this is already split across nodes (Grant SQL separate from Grant BotName).
 - **Related:** reinforces PG-R6 (one node = one needed result) and PG-E4.
-- **Status:** ✅ Confirmed (read-only test + splitting across nodes).
+- **Status:** ✅ Confirmed (read-only test + splitting into nodes).
 
 ---
 
 ## ✅ Solutions (continued)
 
-### PG-R7. "One row per user" draft — on starting a new item, reset carried-over fields
+### PG-R7. Draft "one row per user" — when starting a new item, reset carried-over fields
 
-- **Context:** wizard state (a post draft) is stored as a single `pub_drafts` row per
+- **Context:** the wizard state (post draft) is stored as a single `pub_drafts` row per
   `user_id` (UPSERT `ON CONFLICT (user_id)`). The same row is reused for the next post.
-- **Pitfall:** when generating the text of a NEW post, the UPSERT updated
-  `mode/idea/header/post/stage` but **didn't touch the derived fields of the previous post**
-  (`image_url`, `ig_caption`). Result: the new post inherited the old cover/caption; the
-  frontend (polling `draft/get`) picked up the old image and offered "Regenerate" instead of
-  creating a new one.
-- **Solution:** in `ON CONFLICT DO UPDATE` for a new item, **explicitly reset all
+- **Gotcha:** the UPSERT that generates text for a NEW post updated `mode/idea/header/post/stage`
+  but **left the previous post's derived fields untouched** (`image_url`, `ig_caption`). Result:
+  the new post inherited the old cover image/caption; the frontend (polling `draft/get`) picked
+  up the stale image and offered "Regenerate" instead of creating a new one.
+- **Solution:** in `ON CONFLICT DO UPDATE` for a new item, **explicitly null out all
   carried-over/derived fields**:
   `... SET mode=$1, idea=$2, header=$3, post=$4, stage='text', image_url=NULL, ig_caption=NULL, updated_at=now()`.
-  The general rule: when reusing a state row, a new "lifecycle" must reset everything that
-  belonged to the previous one, not just the fields being overwritten.
-- **Client-side protection (extra):** also clear the mirror on the frontend at start
-  (`S.draft.imageUrl=''; igCaption=''`), otherwise a persistent polling watcher will re-pick
-  up the stale data.
+  General rule: when reusing a state row, starting a new "life cycle" must reset everything
+  that belonged to the previous one, not just the fields being overwritten.
+- **Client-side guard (extra):** also clear the frontend's mirror on start
+  (`S.draft.imageUrl=''; igCaption=''`), otherwise a lingering polling watcher will pick up
+  stale data again.
 
 Status: ✅ Confirmed.
 
-### PG-R8. Free JSONB merge (`data || EXCLUDED.data`) — new frontend metrics without schema migrations
+### PG-R8. Free-form JSONB merge (`data || EXCLUDED.data`) — new frontend metrics without schema migrations
 
-- **Context:** the frontend (the "Diary" Mini App) writes daily metrics; the set of keys grows
+- **Context:** the frontend (Mini App "Journal") writes daily metrics; the set of keys grows
   from version to version (added `stress`, `anxiety`, `focus`, `sleep_quality`,
   `meditation_min`, a `reflection` object, `nutrition` became a number). Storing each key as a
   separate column → a migration for every new metric.
-- **Solution:** keep the metrics in a single JSONB column `data` and do a **partial merge** in
-  the UPSERT: `INSERT … ON CONFLICT (telegram_id, day) DO UPDATE SET data = daily_checkin.data || EXCLUDED.data`.
-  The `||` operator for jsonb is a shallow merge: new/changed keys are overwritten, old ones
-  are preserved. `checkin/history` returns the entire `data` as-is → new keys come back to the
-  frontend without backend changes.
-- **What it gives:** adding a metric on the frontend does NOT require a DB migration or a
-  workflow change — only testing. Key-name validation via a light regex (`^[a-z][a-z0-9_]{0,40}$`),
-  without a strict whitelist. Values of any type (number/scalar/nested object) pass through.
-- **Boundaries:** `||` merges only the top level — a nested object (`reflection`) is
-  overwritten entirely, not merged key-by-key. If you need a deep merge — `jsonb_set` or a
-  `jsonb_deep_merge` function. The downside of this approach is the lack of a schema at the DB
-  level (types/required keys aren't guaranteed), so keep critical/indexable fields as separate
-  columns, and put only the "extensible tail" of metrics in JSONB.
+- **Solution:** keep metrics in a single JSONB column `data` and do a **partial merge** in the
+  UPSERT: `INSERT … ON CONFLICT (telegram_id, day) DO UPDATE SET data = daily_checkin.data || EXCLUDED.data`.
+  The `||` operator for jsonb does a shallow merge: new/changed keys are overwritten, old ones
+  are preserved. `checkin/history` returns the whole `data` object → new keys reach the
+  frontend with no backend changes.
+- **What this buys:** adding a metric on the frontend requires NO DB migration and NO workflow
+  change — just testing. Key-name validation is a light regex (`^[a-z][a-z0-9_]{0,40}$`),
+  no hard whitelist. Values of any type (number/scalar/nested object) pass through.
+- **Limits:** `||` merges only the top level — a nested object (`reflection`) is overwritten
+  entirely, not merged key-by-key. If a deep merge is needed — `jsonb_set` or a
+  `jsonb_deep_merge` function. The downside of this approach is no DB-level schema
+  (types/required keys aren't guaranteed), so critical/indexed fields should stay separate
+  columns, with JSONB reserved for an "extensible tail" of metrics.
 
 Status: ✅ Confirmed.
 
-### PG-R9. Idempotency of scheduling: a stage filter when inserting from a reusable draft row
+### PG-R9. Idempotent scheduling: stage filter when inserting from a reused draft row
 
-- **Symptom:** the same post appeared in the queue twice (two `publisher_queue` rows, identical
-  content and `publish_at`).
+- **Symptom:** the same post appeared in the queue twice (two `publisher_queue` rows,
+  identical content and `publish_at`).
 - **Cause:** the `publish/schedule` action inserted a row by reading the draft
-  `... FROM pub_drafts WHERE post<>'' AND image_url<>''` — **without checking the stage**. After
-  the first scheduling the stage → `queued`, but `post`/`image_url` remain → a repeat call
-  (a double tap on the time button / a retry / a webhook redelivery) passes the filter again and
-  inserts a duplicate. One call = one row (`INSERT ... SELECT FROM src`), so a duplicate = two
-  calls.
-- **Solution:** add an active-stage filter to `src` — insert only from a NON-finished
-  draft: `... AND stage IN ('idea','text','image','preview')`. After the first scheduling
-  (`stage='queued'`) a repeat call finds 0 rows in `src` → `INSERT ... SELECT` inserts nothing
-  → idempotent. The general rule: **any "one-time" insert from a state row that keeps living
-  must be gated by a stage/"already processed" flag**, otherwise a repeated request breeds
-  duplicates.
-- **Extra client-side protection:** an in-flight flag against a double tap — kills the
-  duplicate before the backend even. Full protection against the race is also provided by a
-  unique index, but the stage filter covers the real case (a sequential double tap).
+  `... FROM pub_drafts WHERE post<>'' AND image_url<>''` — **with no stage check**. After the
+  first scheduling, the stage → `queued`, but `post`/`image_url` remain → a repeat call
+  (double tap on the time button / retry / webhook redelivery) passes the filter again and
+  inserts a duplicate. One call = one row (`INSERT ... SELECT FROM src`), so a duplicate =
+  two calls.
+- **Solution:** add an active-stage filter to `src` — insert only from a NOT-finished draft:
+  `... AND stage IN ('idea','text','image','preview')`. After the first scheduling
+  (`stage='queued'`), a repeat call finds 0 rows in `src` → `INSERT ... SELECT` inserts
+  nothing → idempotent. General rule: **any "one-time" insert from a state row that stays
+  alive must be gated by a stage/"already processed" flag**, otherwise a repeated request
+  produces duplicates.
+- **Extra client-side guard:** an in-flight flag against a double tap catches the duplicate
+  before it even reaches the backend. A unique index gives full protection against the race,
+  but the stage filter covers the real-world case (a sequential double tap).
 
 Status: ✅ Confirmed.
+
+### PG-R10. Atomic payment activation: status capture + accrual + access grant in one CTE (retry-safe)
+
+- **Context:** the payment provider's callback (Robokassa Result) has to mark a payment `paid`,
+  extend the subscription, and grant access — idempotently, since the provider **retries** the
+  callback until it gets `OK`. Separate nodes (Mark Paid → Activate → Grant) are unsafe: if
+  activation fails AFTER mark-paid, on retry mark-paid returns 0 rows ("already paid") →
+  activation is skipped → **money charged, no access, permanently** (visible only in the error
+  log).
+- **Solution:** one Postgres node with a data-modifying CTE: status capture (like PG-R4) as
+  the "gate," with the remaining steps reading data FROM it:
+
+```sql
+WITH paid AS (
+  UPDATE payments SET status='paid', paid_at=now()
+  WHERE inv_id=$1 AND status<>'paid'
+  RETURNING inv_id, telegram_id, plan
+),
+act AS (
+  INSERT INTO profile (telegram_id, plan, plan_until)
+  SELECT telegram_id, plan, now()+interval '30 days' FROM paid
+  ON CONFLICT (telegram_id) DO UPDATE SET plan=EXCLUDED.plan,
+    plan_until=GREATEST(now(),COALESCE(profile.plan_until,now()))+interval '30 days'
+  RETURNING telegram_id
+),
+granted AS (
+  INSERT INTO bot_access (telegram_id, bot, active)
+  SELECT telegram_id,'<product_slug>',true FROM paid
+  ON CONFLICT (telegram_id, bot) DO UPDATE SET active=true RETURNING telegram_id
+)
+SELECT inv_id, telegram_id, plan FROM paid;
+```
+
+  Guarantees: (1) `act`/`granted` read `FROM paid` → they fire ONLY when the capture produced
+  a row; (2) it's all one statement = one transaction → a partial failure rolls back
+  EVERYTHING, and a retry repeats it wholesale; (3) a retry after success: `paid` is empty →
+  0 rows → the downstream IF on `inv_id` routes to "already processed" (respond OK without
+  re-granting/double-charging). Activation takes `plan`/`telegram_id` from the payment ROW
+  (server-side values), not from the callback's parameters — which also protects against
+  request parameter tampering.
+- **Nuances:** the node must have `alwaysOutputData` (on retry, 0 rows → an empty item → the
+  IF routes to "OK"; otherwise there are no input items → downstream doesn't execute → the
+  payment provider gets no response and retries forever). A CTE name must not collide with a
+  SQL keyword (`grant` → `granted`).
+- **Related:** extends PG-R4 to multiple tables in one transaction.
+
+Status: 🟡 Draft — applied and validated against markers, awaiting a live payment for
+confirmation.
+
+### PG-R11. Subscription plan change: charging the difference + canceling the previous parent operation
+
+- **Task:** a subscriber wants a more expensive plan. The naive approach ("just pay for the
+  new one") causes two problems: (1) the payment provider ends up with TWO parent operations,
+  and the recurring charge bills against the old, cheaper one; (2) the term is computed as
+  "remaining days + 30," even though the person already paid the full price.
+- **Surcharge calculation:** `credit = current_price * days_remaining / 30`, `amount_due =
+  max(1, new_price − credit)`. Cap days at the period length (`LEAST(30, …)`) — otherwise an
+  accumulated time surplus zeroes out the payment.
+- **Canceling the previous subscription — in the same CTE as activation:**
+
+```sql
+superseded AS (
+  UPDATE payments p SET superseded_at=now()
+  FROM paid
+  WHERE p.telegram_id=paid.telegram_id AND p.recurring=true AND p.status='paid'
+    AND p.prev_inv_id IS NULL AND p.superseded_at IS NULL AND p.inv_id <> paid.inv_id
+    AND paid.recurring=true
+  RETURNING p.inv_id
+)
+```
+
+  And the selection for billing takes the **most recent non-superseded one**: `... AND
+  superseded_at IS NULL ORDER BY inv_id DESC LIMIT 1` (it used to be `ASC` = always the first
+  one, i.e. permanently the old plan).
+- **The term on a plan change ≠ the term on renewal:** `CASE WHEN EXCLUDED.plan <>
+  profile.plan THEN now() + 30d ELSE GREATEST(now(), plan_until) + 30d END`. Otherwise an
+  upgrade gifts a double period.
+- **Downgrading a plan** is done starting from the next charge (just change the plan in the
+  profile, don't touch money) — this avoids needing refunds or offer amendments.
+- **The recurring charge amount comes from the plan, not from the parent payment** — otherwise
+  after an upgrade with a surcharge, the person would keep paying the surcharge amount
+  forever. Open question for the payment provider: is it allowed to charge MORE than the
+  parent amount (undocumented) — clarify when setting up the service.
+- **Store consent for auto-charges in a separate table** (`recurring_consents`: who, plan,
+  amount, period, offer version and URL, consent text, timestamp) and link it to the payment —
+  payment providers require this when enabling recurring billing.
+
+Status: 🟡 Draft — rolled out in the payment flow, to be confirmed after the service is
+connected and the first live upgrade.
+
+---
+
+## ⚠️ Errors (continued)
+
+### PG-E6. After a Postgres node (INSERT/UPDATE), `$json` has NO fields from your query — an IF after it should reference the source node
+
+- **Symptom:** an IF node after a Postgres INSERT always goes to the false branch; a feature
+  (e.g. a warning) silently never fires.
+- **Cause:** a Postgres node's output = the query result (for INSERT — empty/service data),
+  not the item that went into it. `{{ $json.warn }}` after `Plan Count` reads a nonexistent
+  field.
+- **Fix:** in nodes after Postgres, reference the source node of the decision:
+  `{{ $('Plan Gate').first().json.warn }}`. Plus `alwaysOutputData: true` on INSERT nodes
+  inside the chain — otherwise an empty output breaks the rest of the pipeline.
+- **Status:** ⚠️ Gotcha (confirmed by the node's structure).
+
+### PG-E7. Postgres's regex quantifier is capped at 255 — `.{300}` and `{256,}` break the query
+
+- **Symptom:** `invalid regular expression: invalid repetition count(s)` on
+  `regexp_replace`/`~`; the node failed in production after already responding to the user
+  (a post-processing step).
+- **Cause:** in PostgreSQL's POSIX/ARE regexes, neither bound of `{m,n}` may exceed **255**.
+  `.{300}` and `.{301,}` are invalid. Tricky part: the error doesn't show up when writing the
+  query into the node, only at runtime — and only on rows where the regex branch actually
+  executes.
+- **Fix:** keep bounds ≤255; express "longer than N>255" via concatenation: `.{255}.` (255
+  characters + one more). Truncating "to ~300" as `(.{255})[^\n]*` → `\1…`.
+- **Status:** ⚠️ Gotcha (fix confirmed with a control run, dirty=0).
+
+### PG-E8. `RETURNING` returns ONLY the listed columns — downstream reading `$input` gets undefined
+
+- **Symptom:** a node after a Postgres INSERT/UPDATE with `RETURNING inv_id` builds a
+  query/body from `$input.item.json.telegram_id/plan/amount` — all `undefined`; in production
+  it fails SILENTLY (the MD5 signature is computed from a string containing "undefined",
+  `chat_id: NaN`, URL `api.telegram.org/botundefined/...`), and the node reports "success."
+- **Cause:** the output of Postgres `executeQuery` = only the `RETURNING` columns (e.g.
+  `{inv_id}`) — none of the original item's other fields are there. `$input`/`$json` in the
+  next node are exactly that.
+- **Fix:** pull the needed fields from the node WHERE they originated, using the paired item:
+  `$('Prep').item.json.telegram_id` (not `$input`; with multiple items — use `.item`, not
+  `.first()`, so the pairing lines up). From `$input` — only what's actually in `RETURNING`
+  (`inv_id`).
+- **Status:** ⚠️ Gotcha (fix verified against markers).
+
+### PG-E9. A key-based SELECT in a webhook chain without `alwaysOutputData` — a time bomb for NEW users (0 rows = chain breaks)
+
+- **Symptom:** the production webhook works for every tester, but silently breaks for every
+  new user: the execution shows `success`, the last node — a Postgres SELECT with `items=0`,
+  no response reaches the client → the frontend shows "Invalid server response."
+- **Cause:** `SELECT ... FROM profile WHERE telegram_id=$1` for a new user (no row yet)
+  returns 0 rows → a node without `alwaysOutputData` emits 0 items → everything after it,
+  including Respond, doesn't execute. The catch: EVERY existing account has a row, so any
+  self-test passes — the regression only shows up with a new user.
+- **Fix (2 layers):** (1) a scalar subquery — always exactly 1 row:
+  `SELECT (SELECT trial_started_at FROM profile WHERE telegram_id=$1) AS trial_started_at;`
+  (NULL if there's no profile); (2) `alwaysOutputData: true` on the node. Either one is
+  enough, but set both.
+- **Process rule:** any change to a payment/onboarding path must be run through a "NEW user"
+  scenario (a telegram_id with no row in profile/DB), not just against existing accounts.
+  After adding a Postgres SELECT to a webhook chain — immediately ask yourself: "what happens
+  on 0 rows?"
+- **Status:** ⚠️ Gotcha (fix: scalar subquery + alwaysOutputData).
+
+### PG-E10. Cloud database — the IP allowlist doesn't pick up a server migration on its own
+
+- **Symptom:** a workflow with an external (non-internal-n8n) Postgres node fails with
+  `Connection refused` after n8n moves to a new server, even though the credentials and host
+  are the same.
+- **Cause:** Beget's "Cloud Databases" (cp.beget.com → Cloud → Cloud Databases → the specific
+  DB → "Settings") by default only allow connections from the private network plus an explicit
+  IP allowlist ("External network access"). The allowlist contains the old server's IP — when
+  moving to a new IP, nothing adds it there automatically.
+- **Fix:** go into the specific cloud DB's settings → "External network access" → add the new
+  IP (the old one can stay for now in case of rollback, remove it later). Verification:
+  `nc -zv <host> 5432` from the new server should give `succeeded`, not `refused`.
+- **Process rule:** on any server migration where n8n workflows are involved — check ALL
+  external Postgres/MySQL credentials (not just the internal docker-compose postgres) for
+  IP restrictions at the DB provider, not just DNS/domain.
+- **Status:** ✅ Confirmed (fix applied and verified).
+
+### PG-E11. A `$` sign in SQL breaks the query — the Postgres node treats it as a placeholder
+
+- **Symptom:** a workflow fails with `Syntax error at line 2 near "..."`, even though the
+  query runs fine in psql. The error position points somewhere unrelated to the actual
+  problem — which is the most confusing part.
+- **Cause:** n8n's Postgres node itself parses `$…` as a `queryReplacement` placeholder. Any
+  `$` in the query text — including one inside a string literal — gets caught by this
+  handling and mangles the SQL. Classic case: a regex for validating a number
+
+```sql
+CASE WHEN (e->>'k') ~ '^[0-9]+(\.[0-9]+)?$' THEN (e->>'k')::numeric ELSE 0 END
+```
+
+  Here `$` is an end-of-string anchor, but the node sees a placeholder.
+
+  Minimal repro (fails without the rest of the query):
+
+```sql
+SELECT (CASE WHEN ('150' ~ '^[0-9]+$') THEN 1 ELSE 0 END) AS r;
+```
+
+- **Fix:** don't use `$` in SQL at all. For jsonb, a type check instead of a regex is both
+  shorter and more reliable:
+
+```sql
+CASE WHEN jsonb_typeof(e->'k')='number' THEN (e->>'k')::numeric ELSE 0 END
+```
+
+  If a regex is truly needed — move the check to a Code node, or do without `$` anchors.
+- **Why it's dangerous:** a query inside a scheduled workflow (weekly report) fails silently —
+  the person simply doesn't get their report. Test new SQL against a live database before it
+  goes into a schedule.
+- **Status:** ✅ Confirmed (isolated with a minimal example).
+
+### PG-E12. A multi-row `VALUES (…),(…)` with placeholders only inserts the first row
+
+- **Symptom:** n8n's Postgres node returns `success: true`, but only one row shows up in the
+  table instead of two. No error, clean logs.
+- **What it looked like:** `INSERT INTO t(a,b,c) VALUES ($1::bigint,'user',$2::text),($3::bigint,'assistant',$4::text);`
+  with four parameters in `queryReplacement`. Only the `$1/$2` pair got written.
+- **Working form:** `INSERT INTO t(a,b,c) SELECT $1::bigint,'user',$2::text UNION ALL SELECT $1::bigint,'assistant',$3::text;`
+  — reusing a placeholder is fine, both rows land, commas and quotes inside values don't get
+  misaligned.
+- **Why it matters:** silently losing half the records looks like "memory isn't working," and
+  people start debugging the logic instead of the insert. Check with a `SELECT` after the
+  node, not the node's status.
+- **Related:** always pass parameters as an array `={{ [...] }}` — the string form of
+  `queryReplacement` splits on commas (see PG-R5).
+- **Status:** ✅ Confirmed — both forms tested against the production DB inside a rolled-back
+  transaction.
+
+### PG-E13. A SQL comment ate a comma and broke a daily workflow for three days
+
+- **Symptom:** <workflow_name> (subscription auto-renewal) failed every day at 07:00 for three
+  days straight. Error `Failed query` in the `Renewal Due` node. Nobody noticed: the workflow
+  is silent, and nobody happened to be due for a charge on those days.
+- **Cause:** an edit added an explanatory note at the end of a SELECT-list line — `... AS
+  charge_date -- charging happens a day before expiry, so the text shows the attempt date,`
+  — and the comma separating columns ended up INSIDE the comment. The following `CASE p.plan
+  ...` was left hanging with no separator.
+- **Fix:** move the comment to its own line, keep the comma in the code. The fixed SQL was run
+  live — success.
+- **Rule:** editing a comment in SQL is editing SQL. A single-line `--` eats everything to the
+  end of the line, including syntactic punctuation. After any such edit — a live run, not
+  "looks right by eye."
+- **How to catch it earlier:** daily workflows with no user-facing feedback need to be checked
+  against execution statuses, not left waiting for a complaint. Three `error`s in a row in the
+  list is already a signal.
+- **Status:** ✅ Fixed and verified with a live run; no damage — nobody fell within the
+  charge/warning window on those days.

@@ -64,6 +64,7 @@ Domain prefix + type (`R` = solution / `E` = error) + number. Example: `DEP-R2`,
 | TG  | Telegram nodes (trigger, sendMessage, sendPhoto, buttons, voice) | `references/en/telegram.md` |
 | SET | Edit Fields (Set), field mapping, Execute Workflow | `references/en/set-transforms.md` |
 | AI  | AI Agent, model choice, memory, RAG, toolWorkflow | `references/en/ai-agents.md` |
+| HTTP | Calling third-party HTTP APIs: multipart uploads, Code-node sandbox limits, async job_id polling | `references/en/http-requests.md` |
 | DBG | Debugging, sandbox benches, expensive scenarios | `references/en/debugging-sandbox.md` |
 | IG  | Publishing to Instagram via the Graph API | `references/en/instagram.md` |
 | —   | Project methodology (structure, naming, architecture, protocols) | `references/en/methodology.md` |
@@ -89,6 +90,14 @@ Domain prefix + type (`R` = solution / `E` = error) + number. Example: `DEP-R2`,
 | Dollar-quoting with a numeric value breaks n8n's `$N` scanner | PG-E3 | postgres |
 | Multi-statement SQL as an n8n expression → "invalid syntax" | PG-E4 | postgres |
 | Multi-statement executeQuery returns the FIRST statement's result | PG-E5 | postgres |
+| After INSERT/UPDATE, `$json` has no fields from your query | PG-E6 | postgres |
+| Postgres's regex quantifier is capped at 255 | PG-E7 | postgres |
+| `RETURNING` returns only the listed columns — downstream `$input` is undefined | PG-E8 | postgres |
+| A key-based SELECT without `alwaysOutputData` breaks the chain for new users | PG-E9 | postgres |
+| Cloud DB IP allowlist doesn't follow a server migration | PG-E10 | postgres |
+| A `$` in SQL breaks the query — treated as a placeholder | PG-E11 | postgres |
+| Multi-row `VALUES (…),(…)` with placeholders only inserts the first row | PG-E12 | postgres |
+| A SQL comment ate a comma and broke a daily workflow for days | PG-E13 | postgres |
 | Telegram ignores `parse_mode: ""`, text arrives with Markdown | TG-E1 | telegram |
 | sendPhoto can't find the photo / the `photo` param doesn't work | TG-E2 | telegram |
 | "sent automatically with n8n" attribution in the bot's messages | TG-E3 | telegram |
@@ -103,13 +112,37 @@ Domain prefix + type (`R` = solution / `E` = error) + number. Example: `DEP-R2`,
 | `field expects a number but we got expression_string` in a Set node | SET-E1 | set-transforms |
 | Execute Workflow passes its own input item to the sub-workflow | SET-E2 | set-transforms |
 | Code node (Run Once for All Items) returning one item drops the rest | SET-E3 | set-transforms |
+| `$('Node').item` breaks across nodes once there are ≥2 items | SET-E4 | set-transforms |
+| A lookup node with `executeOnce` collapses the stream to one run | SET-E5 | set-transforms |
 | `pairedItem` breaks on the openAi v2.1 node (`.item` → undefined) | AI-E1 | ai-agents |
 | An agent tool returns "unavailable" — the tool-workflow is deactivated | AI-E2 | ai-agents |
 | Postgres Chat Memory `Got unexpected type: constructor` after manual INSERT | AI-E3 | ai-agents |
 | Tool-call-leak recovery parser duplicates the write on a repeated marker | AI-E4 | ai-agents |
 | Follow-up moved to tomorrow due to the hard floor `in_days≥1` | AI-E5 | ai-agents |
+| Switching OpenAI model generation breaks nodes with deprecated params | AI-E6 | ai-agents |
+| Reasoning models: response text isn't in `output[0]` | AI-E7 | ai-agents |
+| The agent talks about ITSELF using the user's grammatical gender | AI-E8 | ai-agents |
+| An echo bot loses the owner notification on delivery failure | AI-E9 | ai-agents |
+| The agent lies about "yesterday" — dates are right, subtraction is wrong | AI-E10 | ai-agents |
+| A male agent talks about itself in the feminine, mirroring the user | AI-E11 | ai-agents |
+| The agent doesn't sense an overnight pause — no timestamps in history | AI-E12 | ai-agents |
+| An expensive LLM feature with no counter = a hole in unit economics | AI-E13 | ai-agents |
+| The model puts the wrong thing into a structured field | AI-E14 | ai-agents |
+| The model sums numbers its own way — give totals to the server | AI-E15 | ai-agents |
+| "Last N messages" ≠ "for the period" — window is sliced by count, not time | AI-E16 | ai-agents |
+| The bot says "I see the photo" without having vision | AI-E17 | ai-agents |
+| JSON repair delivered the report, but gutted — fix the cause, not symptom | AI-E18 | ai-agents |
+| Decoupling a subsystem leaves the access gate alive in neighbor workflows | AI-E19 | ai-agents |
+| A prompt in an HTTP node's `jsonBody`: over-escaping → `invalid syntax` | AI-E20 | ai-agents |
+| A Code node cannot make an authenticated HTTP request | HTTP-E1 | http-requests |
+| A pre-built multipart buffer as raw binary → `source.on is not a function` | HTTP-E2 | http-requests |
+| Web APIs (`URLSearchParams` etc.) unavailable in the Code node | HTTP-E3 | http-requests |
+| Robokassa: the Receipt goes into the signature WITHOUT URL-encoding | HTTP-E4 | http-requests |
+| A long synchronous webhook response gets cut off at ~30s outside the server | HTTP-E5 | http-requests |
 | Double reply on a batch of messages | DBG-E1 | debugging-sandbox |
 | Telegram-trigger webhook returns 403 "secret is not valid" on curl | DBG-E2 | debugging-sandbox |
+| Traefik reports "running" but isn't listening on the port | DBG-E3 | debugging-sandbox |
+| Two live n8n instances with the same workflows fire schedules independently | DBG-E4 | debugging-sandbox |
 | "Insufficient developer role permissions" when linking an IG account | IG-E1 | instagram |
 | Error 9004/2207052 "Failed to download media file" creating an IG container | IG-E2 | instagram |
 
@@ -132,6 +165,8 @@ Domain prefix + type (`R` = solution / `E` = error) + number. Example: `DEP-R2`,
 | "One row per user" draft — reset carried-over fields on a new item | PG-R7 | postgres |
 | Free JSONB merge (`data \|\| EXCLUDED.data`) — no schema migrations | PG-R8 | postgres |
 | Idempotent scheduling via a stage filter on insert | PG-R9 | postgres |
+| Atomic payment activation in one retry-safe CTE | PG-R10 | postgres |
+| Subscription plan change: charge the difference, cancel the old parent op | PG-R11 | postgres |
 | Disable the n8n attribution in Telegram | TG-R1 | telegram |
 | Default parse_mode `HTML` + escape `<>&` | TG-R2 | telegram |
 | The "typing…" indicator without losing item data | TG-R3 | telegram |
@@ -149,6 +184,7 @@ Domain prefix + type (`R` = solution / `E` = error) + number. Example: `DEP-R2`,
 | Web login via the Telegram Login Widget → a session HMAC token | TG-R14 | telegram |
 | A secure Telegram avatar proxy (signed URL) | TG-R15 | telegram |
 | Channel mirroring without creating a loop | TG-R16 | telegram |
+| Deep-link a bot message to a specific Mini App screen | TG-R17 | telegram |
 | Choose an LLM for the task | AI-R1 | ai-agents |
 | Default stack for AI scenarios | AI-R2 | ai-agents |
 | Parse the openAi v2.1 response in JSON mode | AI-R3 | ai-agents |
@@ -162,6 +198,25 @@ Domain prefix + type (`R` = solution / `E` = error) + number. Example: `DEP-R2`,
 | Agent states the coarse precision of cron delivery honestly | AI-R11 | ai-agents |
 | A web chat on top of the same agent (shared sessionKey) | AI-R12 | ai-agents |
 | A deferred follow-up tool that can also fire "today" | AI-R13 | ai-agents |
+| A background tool call that the model keeps skipping — how to force it | AI-R14 | ai-agents |
+| Weekly deep dive into user data with a collapsible-UI JSON output | AI-R15 | ai-agents |
+| A hard length limit an LLM can't self-enforce — margin + deterministic trim | AI-R16 | ai-agents |
+| A daily proactive-touch cap via counter+date, not a single last_at | AI-R17 | ai-agents |
+| A monetization gate before the agent — fail-open, dedup, absolute counters | AI-R18 | ai-agents |
+| Static user data in the system context instead of a mandatory tool call | AI-R19 | ai-agents |
+| A consent gate (e.g. 152-FZ) as a deterministic button, not via the LLM | AI-R20 | ai-agents |
+| A conditional prompt phase block that doesn't break the prefix cache | AI-R21 | ai-agents |
+| Paid generation in a webhook: gate → LLM-JSON → image → INSERT | AI-R22 | ai-agents |
+| Vision for food photos: a mini model is enough and cheaper | AI-R23 | ai-agents |
+| Long-term memory hygiene: TTL + weekly auto-review with a code guard | AI-R24 | ai-agents |
+| Guided agent sessions via a trigger phrase + a prompt protocol | AI-R25 | ai-agents |
+| A crisis-safety protocol in a wellness agent's prompt | AI-R26 | ai-agents |
+| Verify a prompt change on a synthetic profile + safe deduplication | AI-R27 | ai-agents |
+| Robust LLM-JSON parsing: bracket repair + an honest `throw` | AI-R28 | ai-agents |
+| Day-by-day proactive funnel: deterministic pick + free-form LLM text | AI-R29 | ai-agents |
+| A Mini App action continued by the agent in chat (seeded memory) | AI-R30 | ai-agents |
+| Dynamic multipart upload: Switch + K copies of the HTTP node | HTTP-R2 | http-requests |
+| Async webhook (job_id + polling) for operations longer than 30s | HTTP-R3 | http-requests |
 | Set up/use a sandbox for an expensive scenario | DBG-R1 | debugging-sandbox |
 | Order of debugging a failed node | DBG-R2 | debugging-sandbox |
 | Validate initData in the Code sandbox with pure JS | DBG-R3 | debugging-sandbox |
