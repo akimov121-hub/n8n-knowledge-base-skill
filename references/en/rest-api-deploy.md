@@ -108,6 +108,36 @@ Related to DEP-E5. Status: ✅ Rule.
   one real run.
 - **Status:** ✅ Confirmed in practice (a real publish went through).
 
+### DEP-R7. Deploying scenarios via a script through the Public API: push by name, auto-binding the Error Workflow, tags, activation, GET cross-check
+
+- **Why:** a stream of small scenarios on a contour without a UI — each one must come out with an error
+  handler and a tag, and nobody should have to remember this by hand.
+- **Deploy script** (stdlib, the Public API key is pulled from a protected secrets store):
+  the "deploy workflow file" command substitutes the notification recipient in place of the placeholder
+  in the JSON → looks up the workflow by name (`GET /workflows?limit=250`) → `PUT` or `POST` with only
+  `{name, nodes, connections, settings}` and the settings whitelist (see DEP-E7) →
+  `settings.errorWorkflow` = the id of the shared handler found by name (no handler found —
+  stop, except when deploying the handler itself) → tags via `POST /tags` + `PUT /workflows/{id}/tags
+  [{id}]` → `POST /activate` → **GET cross-check** (name, node count, errorWorkflow, active). Before
+  every PUT — a snapshot of the current version into a backup folder (in `.gitignore`). A separate command —
+  bind the shared error handler to already-deployed scenarios, preserving nodes and activation state
+  (cross-check afterward).
+- **Credentials:** the Public API does not list them; the workflow JSON only carries `credentials: {type: {id,
+  name}}`. Get the id at creation time (`POST /credentials` returns the id) or read-only from the instance
+  DB: `select id, name, type from credentials_entity`.
+- **Updating an active workflow via PUT** re-registers triggers on its own (Schedule/Webhook
+  kept working without a separate deactivate/activate).
+- **Addendum — folders.** The n8n 2.37 Public API neither returns nor accepts a scenario's folder:
+  `GET /workflows/{id}` has no `parentFolderId` or similar field, even though the instance's internal DB
+  does have the `workflow_entity."parentFolderId"` column (folders live in the `folder` table). Read the
+  folder only from the DB, read-only: `select w.id, coalesce(f.name,'') from workflow_entity w left
+  join folder f on f.id = w."parentFolderId"`. The deploy script checks the folder before and after PUT
+  and warns if the scenario dropped out of its folder. A new scenario (POST) lands in the root.
+  ✅ **PUT via the Public API preserves the folder** (a body without `parentFolderId` doesn't touch the
+  column) — verified with a no-op deploy of a scenario from an existing folder.
+- **Status:** ✅ Confirmed (several scenarios deployed via the script, a receiving integration
+  rebound to the shared error handler without losses).
+
 ---
 
 ## ⚠️ Errors
@@ -189,6 +219,103 @@ Related to DEP-E5. Status: ✅ Rule.
   PUT the main one. A sub-workflow with an Execute Workflow Trigger activates without webhooks — that's
   safe.
 - **Status:** ⚠️ Confirmed in practice.
+
+### DEP-E9. The generator has drifted from production: deploying wipes out manual edits made in n8n
+
+- **Symptom:** before rolling out a change, the workflow generator's output was diffed against the live
+  workflow, revealing that the deploy would have destroyed working things: several nodes entirely (the
+  branch that receives content into a separate inbox and the branch that handles the menu command),
+  the routing rule for that command, the credential binding for third-party image hosting (imgBB — present
+  in production, missing in the generator, so images would have stopped loading), and an already-fixed
+  parser for a reasoning model's response in one of the nodes (fixed in production, but the generator still
+  had the old version — the old bug would have come back).
+- **Cause:** edits were made directly in n8n (fast, and often justified), but were never carried back
+  into the generator. Meanwhile the generator keeps being treated as the "source of truth" — and a month
+  later silently stops being one. An extra tell: the generator's built-in self-check was failing on a stale
+  credential check — a sure sign that the generator hadn't been run in a while and the drift had been
+  accumulating.
+- **Solution:** before every `PUT` from the generator — a **machine cross-check against the live
+  workflow**: nodes present only in live, nodes present only in gen, a `parameters` and `credentials`
+  diff for every shared node, a `connections` diff. Everything that exists only in live gets carried into
+  the generator BEFORE deploying. Every discrepancy gets explained by name: "this is my edit" / "this is
+  an n8n default" / "this is a loss."
+- **A separate gotcha:** the diff also catches losses in the other direction. The generator was setting
+  `maxTokens` on every AI node, but in production the reasoning nodes had no limit. For reasoning models,
+  the reasoning itself consumes the same budget, so a hard `maxTokens` on a generative node would have
+  truncated the actual answer — an empty result instead of content. The limit is now set only on
+  non-reasoning models.
+- **General rule:** "generate → deploy" is safe exactly until the first manual edit in the
+  UI. After that, the only protection is a diff before rollout; a backup saves you after an incident,
+  a diff saves you before one.
+- **Cross-check script:** compare a fresh production GET against the generated JSON over the sets of
+  node names, `parameters`, `credentials`, and `connections`; filter out noise from n8n defaults
+  (`temperature: 1`, `method: GET`, `outputPropertyName`, `sendQuery: false`, leading newlines in
+  `jsCode`) by eye — it's harmless.
+- **Status:** ✅ Confirmed — the discrepancies were carried into the generators, the workflows were
+  deployed, production is working.
+
+### DEP-E10. n8n 2.x only writes files under ~/.n8n-files, the Execute Command node is gone
+
+- **Task:** move generated files (e.g., cover images) off third-party hosting onto our own
+  server — n8n needs to write the file into the web root, with the web server serving it as ordinary
+  static content.
+- **Gotcha 1 — the n8n container has nowhere to write.** Neither the main container nor the worker
+  has a mount into the host's web root. Add it as a single line to the shared docker-compose anchor
+  (both services inherit it), then `docker compose up -d` recreates the containers — took about
+  30 seconds, webhooks and bots survived without loss.
+- **Gotcha 2 — "The file … is not writable" on a fully writable directory.** Writes
+  failed both to the mounted directory and even to `/tmp`, even though `docker exec … touch`
+  worked from both containers. Cause: in n8n 2.x, `SecurityConfig.restrictFileAccessTo`
+  defaults to **`~/.n8n-files`** (`@n8n/config/dist/configs/security.config.js`), meaning
+  file operations are only allowed there. The right fix is to mount the target directory
+  exactly there: `- <web-root>/<folder>:/home/node/.n8n-files/<folder>`. That way there's no need
+  to widen `N8N_RESTRICT_FILE_ACCESS_TO` and relax the setting for the whole instance.
+- **Gotcha 3 — the Execute Command node isn't in the build.** Activating the workflow fails
+  with `Unrecognized node type: n8n-nodes-base.executeCommand` (even though `NODES_EXCLUDE` is empty).
+  Anything that needs a shell — file cleanup, `find`, `rm` — has to be moved outside n8n.
+- **How this reshapes cleanup of old files:** the actual `rm` is done by a cron script
+  on the host, while n8n hands out the "what must not be deleted" list via a secret webhook. This way
+  production DB credentials stay inside n8n, the SQL ends up in version snapshots, and the host holds
+  no passwords at all. The script exits silently if the webhook didn't answer or answered with a
+  refusal: an empty list would otherwise mean "delete everything."
+- **Writing the file:** the `n8n-nodes-base.readWriteFile` node (v1), `operation: 'write'`,
+  `fileName` — an absolute path, `dataPropertyName: 'data'`. The input `json` passes straight through
+  (`Object.assign(newItem.json, item.json)`), so it's enough to compute the filename and public URL
+  in the preceding Code node — the next node will pick them up from `$json`.
+- **Status:** ✅ Confirmed in production. Verified with both branches for receiving the file (from
+  base64 and from binary) — the file gets written, the web server serves it byte-for-byte; the cron
+  cleanup ran as expected; publishing picked up the file from our own server and succeeded.
+
+### DEP-E11. Public API: a tag name longer than 24 characters → `409 Tag already exists`
+
+- **Symptom:** `POST /api/v1/tags` with a name longer than 24 characters (e.g., "A corporate
+  client — Module" — the name looks short at a glance, but the limit is already exceeded) responds with
+  `409 Tag already exists`, even though no such tag exists in `GET /tags` or in the tags table. The deploy
+  script, trusting the response code, fails.
+- **Rule:** a tag name must be no longer than 24 characters (an n8n limit; the error message is
+  misleading). When checking whether a tag exists, read the list with `?limit=250` so a truncated
+  list isn't mistaken for the tag's absence.
+- **Status:** ✅ Confirmed.
+
+### DEP-E12. `n8n import:workflow` via the CLI requires an `id` field in the JSON
+
+- **Symptom:** `docker exec n8n n8n import:workflow --input=wf.json` → `null value in column
+  "id" of relation "workflow_entity"`. The Public API generates the id itself; the CLI doesn't.
+- **Rule:** when importing via the CLI, set `"id"` in the JSON (Latin letters/digits, up to
+  16 characters); `import:credentials` via the same path accepts `data` in plaintext and encrypts it
+  with the instance key. If a Public API key is available, deploy through it instead (see DEP-R7);
+  keep the CLI for instances without a key.
+- **Status:** ✅ Confirmed.
+
+### DEP-E13. A parent with Execute Workflow won't save until the sub-scenario is published
+
+- **Symptom:** `PUT /workflows/{id}` on the parent → 400 `Cannot publish workflow: Node "…"
+  references workflow X which is not published. Please publish all referenced sub-workflows
+  first`. A sub-scenario with a single Execute Workflow Trigger, meanwhile, **can** be activated
+  (on n8n 2.37, `POST /workflows/{id}/activate` succeeds).
+- **Rule:** deployment order for the pair — first the sub-scenario and its activation, then
+  the parent. A separate "don't activate" flag for sub-scenarios is no longer needed.
+- **Status:** ✅ Confirmed.
 
 ---
 

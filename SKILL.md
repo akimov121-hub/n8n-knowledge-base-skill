@@ -85,6 +85,11 @@ Domain prefix + type (`R` = solution / `E` = error) + number. Example: `DEP-R2`,
 | After PUT the workflow stays deactivated, `/activate` returns 400 | DEP-E6 | rest-api-deploy |
 | PUT returns 400 `settings must NOT have additional properties` | DEP-E7 | rest-api-deploy |
 | PUT of the main workflow fails 400 until the sub-workflow is "published" | DEP-E8 | rest-api-deploy |
+| A generator drifted from production — deploy wipes out manual edits | DEP-E9 | rest-api-deploy |
+| n8n 2.x only writes files under ~/.n8n-files, Execute Command is gone | DEP-E10 | rest-api-deploy |
+| Public API: a tag name over 24 chars → `409 Tag already exists` | DEP-E11 | rest-api-deploy |
+| CLI `n8n import:workflow` requires an `id` field in the JSON | DEP-E12 | rest-api-deploy |
+| A parent with Execute Workflow won't save until the sub-scenario is published | DEP-E13 | rest-api-deploy |
 | `invalid input syntax for type bigint` in Postgres | PG-E1 | postgres |
 | executeQuery on 0 rows returns `{success:true}`, not 0 items | PG-E2 | postgres |
 | Dollar-quoting with a numeric value breaks n8n's `$N` scanner | PG-E3 | postgres |
@@ -98,6 +103,11 @@ Domain prefix + type (`R` = solution / `E` = error) + number. Example: `DEP-R2`,
 | A `$` in SQL breaks the query — treated as a placeholder | PG-E11 | postgres |
 | Multi-row `VALUES (…),(…)` with placeholders only inserts the first row | PG-E12 | postgres |
 | A SQL comment ate a comma and broke a daily workflow for days | PG-E13 | postgres |
+| An intermediate status with no watchdog = a record hangs forever | PG-E14 | postgres |
+| A DB connection outage takes down all scenarios at once | PG-E15 | postgres |
+| `$N::timestamp` with an empty string fails even inside `CASE WHEN` | PG-E16 | postgres |
+| UPDATE/DELETE affecting no rows returns `{success: true}` like a row | PG-E17 | postgres |
+| A final SELECT in the same query as an UPDATE-CTE sees the pre-update row | PG-E18 | postgres |
 | Telegram ignores `parse_mode: ""`, text arrives with Markdown | TG-E1 | telegram |
 | sendPhoto can't find the photo / the `photo` param doesn't work | TG-E2 | telegram |
 | "sent automatically with n8n" attribution in the bot's messages | TG-E3 | telegram |
@@ -109,11 +119,14 @@ Domain prefix + type (`R` = solution / `E` = error) + number. Example: `DEP-R2`,
 | Update from a channel/supergroup → "channel direct messages topic..." | TG-E9 | telegram |
 | `require('crypto')` forbidden in Code nodes — pure-JS HMAC/SHA256 only | TG-E10 | telegram |
 | Signing Mini App initData for a test: compact JSON + `%20`, not `+` | TG-E11 | telegram |
+| A Telegram send node fires once per incoming item → a burst of duplicates | TG-E12 | telegram |
+| Broadcasting to a list: one unreachable chat aborts everyone after it | TG-E13 | telegram |
 | `field expects a number but we got expression_string` in a Set node | SET-E1 | set-transforms |
 | Execute Workflow passes its own input item to the sub-workflow | SET-E2 | set-transforms |
 | Code node (Run Once for All Items) returning one item drops the rest | SET-E3 | set-transforms |
 | `$('Node').item` breaks across nodes once there are ≥2 items | SET-E4 | set-transforms |
 | A lookup node with `executeOnce` collapses the stream to one run | SET-E5 | set-transforms |
+| A Code node with `executeOnce` sees only the first element | SET-E6 | set-transforms |
 | `pairedItem` breaks on the openAi v2.1 node (`.item` → undefined) | AI-E1 | ai-agents |
 | An agent tool returns "unavailable" — the tool-workflow is deactivated | AI-E2 | ai-agents |
 | Postgres Chat Memory `Got unexpected type: constructor` after manual INSERT | AI-E3 | ai-agents |
@@ -139,10 +152,15 @@ Domain prefix + type (`R` = solution / `E` = error) + number. Example: `DEP-R2`,
 | Web APIs (`URLSearchParams` etc.) unavailable in the Code node | HTTP-E3 | http-requests |
 | Robokassa: the Receipt goes into the signature WITHOUT URL-encoding | HTTP-E4 | http-requests |
 | A long synchronous webhook response gets cut off at ~30s outside the server | HTTP-E5 | http-requests |
+| External image hosting: the link gets checked at the worst possible moment | HTTP-E6 | http-requests |
 | Double reply on a batch of messages | DBG-E1 | debugging-sandbox |
 | Telegram-trigger webhook returns 403 "secret is not valid" on curl | DBG-E2 | debugging-sandbox |
 | Traefik reports "running" but isn't listening on the port | DBG-E3 | debugging-sandbox |
 | Two live n8n instances with the same workflows fire schedules independently | DBG-E4 | debugging-sandbox |
+| A DB-logging error handler goes silent exactly when it's needed most | DBG-E5 | debugging-sandbox |
+| `n8n execute` in-container conflicts with the live instance's runner port | DBG-E6 | debugging-sandbox |
+| Code node truncates the error message to the part after the colon | DBG-E7 | debugging-sandbox |
+| Task runner blocks `require('crypto')`/`$env`/`process` and Web Crypto | DBG-E8 | debugging-sandbox |
 | "Insufficient developer role permissions" when linking an IG account | IG-E1 | instagram |
 | Error 9004/2207052 "Failed to download media file" creating an IG container | IG-E2 | instagram |
 
@@ -156,6 +174,7 @@ Domain prefix + type (`R` = solution / `E` = error) + number. Example: `DEP-R2`,
 | The new workflow's ID — take it only from the server response | DEP-R4 | rest-api-deploy |
 | PATCH a credential (self-update; unstable — see DEP-R6) | DEP-R5 | rest-api-deploy |
 | Rotate a service secret via `service_tokens` at runtime | DEP-R6 | rest-api-deploy |
+| Deploy via script through the Public API: push by name, auto-bind Error Workflow, tags, activate, GET cross-check | DEP-R7 | rest-api-deploy |
 | Embed a value of the right type in Postgres SQL | PG-R1 | postgres |
 | Arbitrary SQL/DDL via a temporary webhook workflow | PG-R2 | postgres |
 | Insert into the lowest free `id` (gap-free numbering) | PG-R3 | postgres |
@@ -167,6 +186,8 @@ Domain prefix + type (`R` = solution / `E` = error) + number. Example: `DEP-R2`,
 | Idempotent scheduling via a stage filter on insert | PG-R9 | postgres |
 | Atomic payment activation in one retry-safe CTE | PG-R10 | postgres |
 | Subscription plan change: charge the difference, cancel the old parent op | PG-R11 | postgres |
+| A new profile field touches 7 places and 4 independent whitelists | PG-R12 | postgres |
+| Partial unique index: close old cards in one node, write new in the next | PG-R13 | postgres |
 | Disable the n8n attribution in Telegram | TG-R1 | telegram |
 | Default parse_mode `HTML` + escape `<>&` | TG-R2 | telegram |
 | The "typing…" indicator without losing item data | TG-R3 | telegram |
@@ -185,6 +206,8 @@ Domain prefix + type (`R` = solution / `E` = error) + number. Example: `DEP-R2`,
 | A secure Telegram avatar proxy (signed URL) | TG-R15 | telegram |
 | Channel mirroring without creating a loop | TG-R16 | telegram |
 | Deep-link a bot message to a specific Mini App screen | TG-R17 | telegram |
+| Non-text input (stickers, video notes, attachments) must not reach the agent empty | TG-R18 | telegram |
+| An alert must not depend on the DB: send first, log second, queue if down | TG-R19 | telegram |
 | Choose an LLM for the task | AI-R1 | ai-agents |
 | Default stack for AI scenarios | AI-R2 | ai-agents |
 | Parse the openAi v2.1 response in JSON mode | AI-R3 | ai-agents |
@@ -215,11 +238,20 @@ Domain prefix + type (`R` = solution / `E` = error) + number. Example: `DEP-R2`,
 | Robust LLM-JSON parsing: bracket repair + an honest `throw` | AI-R28 | ai-agents |
 | Day-by-day proactive funnel: deterministic pick + free-form LLM text | AI-R29 | ai-agents |
 | A Mini App action continued by the agent in chat (seeded memory) | AI-R30 | ai-agents |
+| A pricier model for the client-facing agent, cheaper for the internal one | AI-R31 | ai-agents |
+| Call-quality analysis: dual transcription + reformatting before the LLM | AI-R32 | ai-agents |
+| Competitor content → structured breakdown → generation with traceable attribution | AI-R33 | ai-agents |
+| AI on top of deterministic numbers: SQL finds, the model explains | AI-R34 | ai-agents |
+| Public temp file hosting as a bridge for APIs that need a URL, not binary | HTTP-R4 | http-requests |
+| "Python computes, n8n delivers": broadcast from static JSON behind Basic Auth | HTTP-R5 | http-requests |
 | Dynamic multipart upload: Switch + K copies of the HTTP node | HTTP-R2 | http-requests |
 | Async webhook (job_id + polling) for operations longer than 30s | HTTP-R3 | http-requests |
 | Set up/use a sandbox for an expensive scenario | DBG-R1 | debugging-sandbox |
 | Order of debugging a failed node | DBG-R2 | debugging-sandbox |
 | Validate initData in the Code sandbox with pure JS | DBG-R3 | debugging-sandbox |
+| Test a scheduled scenario live: a webhook stand-in for "send now" | DBG-R4 | debugging-sandbox |
+| Simulate Telegram Trigger updates: the webhook secret is `<workflowId>_<nodeId>` | DBG-R5 | debugging-sandbox |
+| A node with no input items silently breaks the whole chain downstream | DBG-R6 | debugging-sandbox |
 | Access the Instagram API without App Review + a photo publish cycle | IG-R1 | instagram |
 
 ---

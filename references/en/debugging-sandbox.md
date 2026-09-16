@@ -91,6 +91,52 @@ Node (visible in the logs); test on real data via Pin Data before production.
   4. `crypto.subtle` (Web Crypto) is also absent in this sandbox — don't rely on it.
 - **Status:** ✅ Confirmed (the frontend authenticates successfully in production).
 
+### DBG-R4. Testing a scheduled scenario in the live runtime: a webhook stand-in for "send now"
+
+- **Approach:** add a Webhook (GET, random path like `agenda-now-<hex>`) as a second
+  entry point into the chain, feeding into the same first working node. Hitting it with
+  `curl` produces a real production execution (`mode: webhook`): the Error Workflow
+  fires (it doesn't on a manual Execute), the result is visible in Executions, and the
+  schedule itself is untouched. Also convenient for iterating on message formatting with
+  the owner: "send it again" = one curl call.
+- **One-off alternative:** use PUT to move the cron to "now + 3 min", wait for it to
+  fire, then restore the original file with the same PUT (a snapshot before the PUT is
+  mandatory). Works when a permanent stand-in isn't needed.
+- **Risk:** anyone who learns the path could spam the owner. Keep the path only in the
+  private description; in the scenario, the stand-in sends to the same recipient as the
+  schedule, so nothing goes to a stranger.
+- **Status:** ✅ Confirmed.
+
+### DBG-R5. Simulating Telegram Trigger updates without real Telegram: the webhook secret is `<workflowId>_<nodeId>`
+
+- **Task:** test a bot (messages, callback buttons, `/start` with payload) as a
+  different user, without a second account and without pinging real people.
+- **Fix:** the Telegram Trigger registers its webhook with a `secret_token` and returns
+  403 on any POST missing the `X-Telegram-Bot-Api-Secret-Token` header. The secret is
+  computed in `GenericFunctions.getSecretToken` as `${workflow.id}_${node.id}` with
+  characters outside `[A-Za-z0-9_-]` stripped out. Get the node id from
+  `GET /api/v1/workflows/{id}`; the URL is `<N8N_BASE_URL>/webhook/<webhookId>/webhook`.
+  From there, send regular Update objects (`message`, `callback_query`) with that
+  header. Replies the bot sends to real people still go through for real, while replies
+  to fake users fail with `chat not found` (set `onError: continueRegularOutput` on the
+  Bot API node).
+- **Status:** ✅ Confirmed on a live bot; the technique has been reused for similar
+  checks since.
+
+### DBG-R6. A node with no input items doesn't execute — and silently breaks the whole chain downstream
+
+- **Symptom:** notifications didn't go out, no errors: a Code node returned `[]`
+  (nothing to analyze), the next node never ran, and neither did every node after it.
+  In the execution view they just show up gray.
+- **Rule:** if a chain must reach the end regardless of the outcome, the filter node
+  should always emit at least one placeholder item (`{ problem_id: 0 }`), and the
+  receiving side should know how to skip it (SQL with `WHERE id = 0` → empty →
+  `alwaysOutputData`). On Execute Workflow, set `alwaysOutputData: true` and
+  `onError: continueRegularOutput`: an empty response or a failing sub-workflow must
+  not swallow the parent's notifications; the parent should re-read the outcome from the
+  database rather than take it from the sub-workflow's response.
+- **Status:** ✅ Confirmed on real data.
+
 ---
 
 ## ⚠️ Errors
@@ -153,3 +199,65 @@ Node (visible in the logs); test on real data via Pin Data before production.
   keeping both alive "just in case." If parallel testing is needed, manually deactivate
   the schedule workflows on one of the two instances for the duration of the check.
 - **Status:** ⚠️ Open risk until the old server is fully stopped.
+
+### DBG-E5. An error handler that logs to a DB goes silent exactly when it's needed most
+
+- **Symptom:** the connection to the cloud DB dropped for a minute, several scenarios
+  failed — and not a single notification arrived. Worse, the error handler itself
+  failed three times during that minute. The incident went unnoticed and was only
+  found because the owner happened to check the executions list.
+- **Cause:** the chain was `Error Trigger → Prepare Error → Log Incident (Postgres) →
+  Notify Admin (Telegram)`. Logging the incident to the DB happened **before** sending
+  the message. As long as the DB is up, this makes no difference. But the most common
+  reason the handler fires in the first place is exactly a DB outage — and in that
+  case it fails on the very first step, never reaching the notification.
+- **Fix:** `onError: continueRegularOutput` on the logging node (+ 5 retries at 5 s
+  each). Logging is now optional: if the write fails, the message still goes out. No
+  need to reorder the nodes, since the Telegram node reads its data from `Prepare
+  Error`, not from the logging node's result.
+- **How it was verified:** a copy of the handler with a deliberately failing SQL query
+  (`SELECT * FROM no_such_table_xyz`). The logging node returned the error as data,
+  `Notify Admin` still ran and the message was delivered (`message_id` was returned).
+  Before the fix, the chain broke at that exact point.
+- **General rule:** a notifier must not depend on anything that can fail alongside the
+  system it's observing. Everything in it other than actually sending the message is
+  optional: either move it after the send, or swallow its errors. Otherwise you end up
+  with a watcher that goes blind at the exact moment of the outage.
+- **Check for any error handler:** mentally disconnect the DB, the network, the
+  external API — and see whether the message still gets through. If not, reorder or
+  decouple it.
+- **Status:** ✅ Verified on a copy.
+
+### DBG-E6. `n8n execute` from inside the container won't run a scenario with a Schedule Trigger, and conflicts with the live instance over the runner port
+
+- **Symptom:** `docker exec <n8n> n8n execute --id=<id>` → `n8n Task Broker's port 5679
+  is already in use` (a second n8n process in the same container). With
+  `N8N_RUNNERS_BROKER_PORT=5680` it starts, but then fails: `Missing node to start
+  execution — workflow must contain an Execute Workflow Trigger` — in 2.x the CLI can
+  only start from a Manual or Execute Workflow Trigger; it can't "press" a schedule.
+- **What to do instead:** don't waste time on the CLI — test in the live runtime, see
+  DBG-R4.
+- **Status:** ✅ Confirmed.
+
+### DBG-E7. The Code node truncates the error message down to the part after the colon and appends `[line N]`
+
+- **Symptom:** `throw new Error('Channel check: this message should arrive')` →
+  in the Error Trigger, `execution.error.message` comes out as `this message should
+  arrive [line 1]`. n8n treats everything before the colon as the error type label and
+  drops it.
+- **Rule:** don't start `throw` text with a "Label: …" pattern — use a dash or
+  parentheses instead; in the error handler, pull in `error.description` if you need
+  the rest.
+- **Status:** ✅ Confirmed.
+
+### DBG-E8. Under the task runner, a Code node has `require('crypto')`, `$env`, and `process` blocked, and no Web Crypto
+
+- **Symptom:** `require('crypto')` → `Module 'crypto' is disallowed`; `$env.X` →
+  `access to env vars denied` (`N8N_BLOCK_ENV_ACCESS_IN_NODE=true`); `process` is
+  undefined; `globalThis.crypto.subtle` is `undefined`. `Buffer` is available.
+- **Rule:** on this setup, write HMAC/SHA-256 in plain JS (a working implementation
+  already exists in the Mini App API auth node and has been reused elsewhere). Pass
+  secrets into the node as placeholders via the deploy script, not through `$env`.
+  Check which modules are actually available with a temporary webhook scenario rather
+  than guessing — it depends on `NODE_FUNCTION_ALLOW_BUILTIN` and the runner mode.
+- **Status:** ✅ Confirmed.
